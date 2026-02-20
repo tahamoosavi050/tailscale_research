@@ -160,7 +160,7 @@ jobs:
 
       # 🔹 9. RERUN TRIGGER
       - name: 🔁 Trigger Next Run 
-        if: always()
+        if: success()
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}  
         run: |
