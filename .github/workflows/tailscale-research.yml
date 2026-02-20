@@ -132,18 +132,18 @@ jobs:
             AVG_MEM_USED=$(tail -n +2 "$METRICS_FILE" | awk -F, '{sum+=$4; count++} END {printf "%.0f", sum/count}')
             
             cat > "$REPORT_DIR/research_summary.json" << EOF
-            {
-              "research_id": "${{ steps.research.outputs.research_id }}",
-              "run_number": ${{ github.run_number }},
-              "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-              "success": true,
-              "metrics": {
-                "average_cpu_percent": $AVG_CPU,
-                "average_memory_percent": $AVG_MEM_PCT,
-                "average_memory_used_mb": $AVG_MEM_USED
-              }
-            }
-            EOF
+{
+  "research_id": "${{ steps.research.outputs.research_id }}",
+  "run_number": ${{ github.run_number }},
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "success": true,
+  "metrics": {
+    "average_cpu_percent": $AVG_CPU,
+    "average_memory_percent": $AVG_MEM_PCT,
+    "average_memory_used_mb": $AVG_MEM_USED
+  }
+}
+EOF
             cp "$METRICS_FILE" "$REPORT_DIR/system_metrics_raw.csv"
             echo "avg_cpu=$AVG_CPU" >> $GITHUB_OUTPUT
             echo "avg_mem=$AVG_MEM_PCT" >> $GITHUB_OUTPUT
