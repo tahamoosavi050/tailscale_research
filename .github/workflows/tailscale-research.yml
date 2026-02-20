@@ -115,8 +115,7 @@ jobs:
           SLEEP_TIME=$(( (DURATION_HOURS * 3600) - 600 ))
           
           echo "⏳ Sleeping for $SLEEP_TIME seconds..."
-          sleep 1
-          #sleep $SLEEP_TIME
+          sleep $SLEEP_TIME
 
       # 🔹 7. Generate Report
       - name: Generate research report
