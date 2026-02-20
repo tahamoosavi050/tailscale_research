@@ -1,0 +1,179 @@
+name: Tailscale Exit Node Research
+
+on:
+  workflow_dispatch:
+    inputs:
+      research_id:
+        description: 'Unique ID for this research run'
+        required: false
+        type: string
+        default: 'research'
+      duration_hours:
+        description: 'Duration per run (Max 6 hours)'
+        required: false
+        type: string
+        default: '5' # Keep under 6h limit
+  push:
+    branches:
+      - main
+
+jobs:
+  tailscale-exit-node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # Hard stop at 6 hours
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 🔹 1. Start Metrics Collector
+      - name: Start system metrics logger
+        run: |
+          cat > /tmp/metrics_collector.sh << 'EOF'
+          #!/bin/bash
+          METRICS_FILE="/tmp/system_metrics.log"
+          echo "timestamp,cpu_percent,memory_percent,memory_used_mb,memory_total_mb" > "$METRICS_FILE"
+          while true; do
+            TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            CPU=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+            MEM_INFO=$(free -m | grep Mem)
+            MEM_TOTAL=$(echo "$MEM_INFO" | awk '{print $2}')
+            MEM_USED=$(echo "$MEM_INFO" | awk '{print $3}')
+            MEM_PCT=$(awk "BEGIN {printf \"%.1f\", ($MEM_USED/$MEM_TOTAL)*100}")
+            echo "$TIMESTAMP,$CPU,$MEM_PCT,$MEM_USED,$MEM_TOTAL" >> "$METRICS_FILE"
+            sleep 60
+          done
+          EOF
+          chmod +x /tmp/metrics_collector.sh
+          nohup /tmp/metrics_collector.sh > /tmp/metrics.log 2>&1 &
+          echo "Metrics collector started (PID: $!)"
+
+      # 🔹 2. Install Dependencies
+      - name: Installing Deps
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo apt-get update
+          sudo apt-get install -y openssh-server jq
+          echo "Installing desktop environment..."
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-goodies tightvncserver dbus-x11 xauth \
+            x11-xserver-utils xfonts-base xfonts-75dpi xfonts-100dpi \
+            xfonts-scalable fontconfig fonts-dejavu-core --no-install-recommends
+
+      # 🔹 3. Start Tailscale
+      - name: Start Tailscale
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          if [ -z "$TAILSCALE_AUTHKEY" ]; then echo "ERROR: Missing TAILSCALE_AUTHKEY"; exit 1; fi
+          sudo tailscale up --advertise-exit-node --ssh --authkey="$TAILSCALE_AUTHKEY"
+          echo "Tailscale started"
+
+      # 🔹 4. Configure SSH
+      - name: Configure SSH
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          sudo systemctl start ssh && sudo systemctl enable ssh
+          echo "runner:$SSH_PASSWORD" | sudo chpasswd
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh
+
+      # 🔹 5. Configure VNC
+      - name: Configure VNC Server
+        env:
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          mkdir -p ~/.vnc
+          echo "$SSH_PASSWORD" > /tmp/vncpass.txt
+          echo "$SSH_PASSWORD" >> /tmp/vncpass.txt
+          vncpasswd < /tmp/vncpass.txt
+          rm /tmp/vncpass.txt
+          cat > ~/.vnc/xstartup << 'EOF'
+          #!/bin/bash
+          xrdb $HOME/.Xresources
+          startxfce4 &
+          EOF
+          chmod +x ~/.vnc/xstartup
+          vncserver :1 -geometry 1920x1080 -depth 24
+
+      # 🔹 6. Run Research Workload
+      - name: Run research workload
+        id: research
+        env:
+          DURATION_HOURS: ${{ github.event.inputs.duration_hours}}
+          RESEARCH_ID: ${{ github.event.inputs.research_id}}
+        run: |
+          echo "🔬 Research ID: $RESEARCH_ID"
+          echo "⏱️  Duration: ${DURATION_HOURS}h"
+          echo "research_id=$RESEARCH_ID" >> $GITHUB_OUTPUT
+          echo "success=true" >> $GITHUB_OUTPUT
+          
+          # Calculate sleep time (leave 10 mins for cleanup/rerun)
+          SLEEP_TIME=$(( (DURATION_HOURS * 3600) - 600 ))
+          echo "⏳ Sleeping for $SLEEP_TIME seconds..."
+          sleep $SLEEP_TIME
+
+      # 🔹 7. Generate Report
+      - name: Generate research report
+        id: report
+        run: |
+          pkill -f metrics_collector.sh || true
+          sleep 2
+          METRICS_FILE="/tmp/system_metrics.log"
+          REPORT_DIR="research-artifacts"
+          mkdir -p "$REPORT_DIR"
+          
+          if [ -f "$METRICS_FILE" ]; then
+            AVG_CPU=$(tail -n +2 "$METRICS_FILE" | awk -F, '{sum+=$2; count++} END {printf "%.2f", sum/count}')
+            AVG_MEM_PCT=$(tail -n +2 "$METRICS_FILE" | awk -F, '{sum+=$3; count++} END {printf "%.2f", sum/count}')
+            AVG_MEM_USED=$(tail -n +2 "$METRICS_FILE" | awk -F, '{sum+=$4; count++} END {printf "%.0f", sum/count}')
+            
+            cat > "$REPORT_DIR/research_summary.json" << EOF
+            {
+              "research_id": "${{ steps.research.outputs.research_id }}",
+              "run_number": ${{ github.run_number }},
+              "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+              "success": true,
+              "metrics": {
+                "average_cpu_percent": $AVG_CPU,
+                "average_memory_percent": $AVG_MEM_PCT,
+                "average_memory_used_mb": $AVG_MEM_USED
+              }
+            }
+            EOF
+            cp "$METRICS_FILE" "$REPORT_DIR/system_metrics_raw.csv"
+            echo "avg_cpu=$AVG_CPU" >> $GITHUB_OUTPUT
+            echo "avg_mem=$AVG_MEM_PCT" >> $GITHUB_OUTPUT
+          fi
+
+      # 🔹 8. Upload Artifacts
+      - name: Upload research artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-results-${{ github.run_number }}
+          path: research-artifacts/
+          retention-days: 7
+          if-no-files-found: warn
+
+      # 🔹 9. RERUN TRIGGER
+      - name: 🔁 Trigger Next Run 
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}  
+        run: |
+          echo "🔁 Preparing rerun..."
+          
+          # Get inputs for next run
+          NEXT_ID="${{ github.event.inputs.research_id || 'research-$(date -u +"%Y-%m-%dT%H:%M:%SZ")' }}"
+          NEXT_DURATION="${{ github.event.inputs.duration_hours || '5' }}"
+          
+          # Trigger the next workflow run immediately
+          gh workflow run "${{ github.workflow }}" \
+            --repo "${{ github.repository }}" \
+            -f research_id="$NEXT_ID" \
+            -f duration_hours="$NEXT_DURATION"
+          
+          echo "✅ Next run triggered."
